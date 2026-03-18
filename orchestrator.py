@@ -275,7 +275,7 @@ class PipelineOrchestrator:
             "-of","csv=p=0",audio_path], capture_output=True, text=True).stdout.strip() or "0")
         sub_width  = 1080 if is_reel else self.cfg.video_width
         sub_height = 1920 if is_reel else self.cfg.video_height
-        sub_font   = 74   if is_reel else 56   # reels: 1080x1920, long-form: 1920x1080
+        sub_font   = 84   if is_reel else 64   # reels: 1080x1920, long-form: 1920x1080
         sub_margin = 150  if is_reel else 80
         ass_path = os.path.join(work_dir, "subtitles.ass")
         generate_ass_with_highlights(narration, dur, ass_path,
@@ -289,9 +289,9 @@ class PipelineOrchestrator:
             width=1080 if is_reel else self.cfg.video_width,
             height=1920 if is_reel else self.cfg.video_height,
             fps=self.cfg.video_fps, crf=self.cfg.video_crf, preset=self.cfg.video_preset,
-            subtitle_font_size=56,
+            subtitle_font_size=64,
             subtitle_margin_bottom=80,
-            reel_subtitle_font_size=74,
+            reel_subtitle_font_size=84,
             reel_subtitle_margin_bottom=150,
             bg_music_volume=self.cfg.bg_music_volume,
             reel_bg_music_volume=0.12,

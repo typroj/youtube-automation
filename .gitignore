@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+venv/
+env/
+.env
+.venv/
+
+# Environment / secrets
+.env
+*.env
+config/client_secret.json
+config/token.pickle
+config/ig_session.json
+config/*.json
+config/*.pickle
+
+# Pipeline output & temp
+output/
+tmp/
+logs/
+data/topics.db
+scripts_archive/
+assets/music/
+
+# Thumbnails / downloaded images (regenerated each run)
+assets/images/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp

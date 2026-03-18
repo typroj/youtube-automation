@@ -164,6 +164,24 @@ NICHE_CONFIG = {
         "youtube_category": "27",
         "news_keywords": "historical discovery OR archaeology OR ancient history",
     },
+    "world_crisis": {
+        "seeds": [
+            "world war 3", "nuclear threat", "global conflict", "geopolitics",
+            "war news today", "world crisis", "NATO", "Russia Ukraine war",
+            "Middle East conflict", "global threat", "military escalation",
+            "world panic", "superpower conflict", "nuclear war risk",
+            "global emergency", "world news breaking",
+        ],
+        "subreddits": [
+            "worldnews", "geopolitics", "CredibleDefense",
+            "europe", "UkraineWarVideoReport", "GlobalTalk", "news",
+        ],
+        "youtube_category": "25",   # News & Politics
+        "news_keywords": (
+            "world war OR nuclear threat OR military conflict OR NATO OR "
+            "geopolitics OR global crisis OR war news OR invasion OR escalation"
+        ),
+    },
 }
 
 

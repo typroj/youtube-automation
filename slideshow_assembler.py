@@ -293,7 +293,19 @@ class SlideshowAssembler:
     # ─── SUBTITLES (WINDOWS FIX: copy to same dir, use relative paths) ────
 
     def _burn_subs(self, inp, srt, out, font_size, margin):
-        """Burn SRT subtitles. Uses same-directory trick for Windows compatibility."""
+        """
+        Burn subtitles into video. Supports both .srt and .ass files.
+
+        .srt → uses subtitles filter with force_style (plain white text)
+        .ass → uses subtitles filter without force_style; colour/style come
+               from the ASS file itself (enables per-word keyword highlighting)
+
+        Uses same-directory trick for Windows path compatibility.
+        """
+        is_ass = srt.lower().endswith(".ass")
+        sub_filename = "subs.ass" if is_ass else "subs.srt"
+
+        # SRT-only style override (ignored for ASS — styles are embedded)
         style = (
             f"FontSize={font_size},"
             f"PrimaryColour=&H00FFFFFF,"
@@ -303,55 +315,61 @@ class SlideshowAssembler:
             f"Shadow={self.cfg.subtitle_shadow},"
             f"MarginL=40,"
             f"MarginR=40,"
-            f"MarginV={margin},"
-            f"Alignment=2,"
+            f"MarginV=0,"
+            f"Alignment=5,"
             f"WrapStyle=1"
         )
 
-        # Verify SRT exists and has content
+        # Verify subtitle file exists and has content
         if not os.path.exists(srt):
-            self.logger.error(f"    SRT not found: {srt}")
+            self.logger.error(f"    Subtitle file not found: {srt}")
             self._ffmpeg(["ffmpeg", "-y", "-i", inp, "-c", "copy", out])
             return
 
         with open(srt, "r", encoding="utf-8") as f:
-            srt_content = f.read()
-        if len(srt_content.strip()) < 10:
-            self.logger.warning("    SRT file empty, skipping subtitles")
+            sub_content = f.read()
+        if len(sub_content.strip()) < 10:
+            self.logger.warning("    Subtitle file empty, skipping")
             self._ffmpeg(["ffmpeg", "-y", "-i", inp, "-c", "copy", out])
             return
 
-        self.logger.info(f"    SRT entries: {srt_content.count('-->')}")
-        self.logger.info(f"    Style: FontSize={font_size}, MarginV={margin}")
+        entry_count = sub_content.count("-->")
+        self.logger.info(f"    {'ASS' if is_ass else 'SRT'} entries: {entry_count} | "
+                         f"FontSize={font_size}, MarginV={margin}")
 
-        # WINDOWS FIX: Copy input video + SRT to same temp folder
-        # Then run FFmpeg from that folder using relative paths
-        # This avoids all Windows backslash/colon escaping issues
+        # WINDOWS FIX: copy input + subtitle to same temp folder,
+        # then run FFmpeg from that folder using relative paths only.
         burn_dir = os.path.join(self.cfg.temp_dir, "burn_subs")
         os.makedirs(burn_dir, exist_ok=True)
 
         temp_video = os.path.join(burn_dir, "input.mp4")
-        temp_srt = os.path.join(burn_dir, "subs.srt")
-        temp_out = os.path.join(burn_dir, "output.mp4")
+        temp_sub   = os.path.join(burn_dir, sub_filename)
+        temp_out   = os.path.join(burn_dir, "output.mp4")
 
         shutil.copy2(inp, temp_video)
-        shutil.copy2(srt, temp_srt)
+        shutil.copy2(srt, temp_sub)
 
-        # cd into burn_dir so FFmpeg uses relative paths
         original_dir = os.getcwd()
         os.chdir(burn_dir)
 
         try:
+            if is_ass:
+                # ASS: styles (including keyword colours) are baked into the file
+                vf = f"subtitles={sub_filename}"
+            else:
+                # SRT: apply style via force_style
+                vf = f"subtitles={sub_filename}:force_style='{style}'"
+
             cmd = [
                 "ffmpeg", "-y",
                 "-i", "input.mp4",
-                "-vf", f"subtitles=subs.srt:force_style='{style}'",
+                "-vf", vf,
                 "-c:v", self.cfg.codec,
                 "-c:a", "copy",
                 "-pix_fmt", "yuv420p",
                 "output.mp4"
             ]
-            self.logger.info(f"    Running subtitle burn from: {burn_dir}")
+            self.logger.info(f"    Burning subtitles from: {burn_dir}")
             r = subprocess.run(cmd, capture_output=True, text=True)
             if r.returncode != 0:
                 self.logger.error(f"    Subtitle burn failed: {r.stderr[-500:]}")
@@ -361,17 +379,15 @@ class SlideshowAssembler:
         finally:
             os.chdir(original_dir)
 
-        # Move result to actual output path
         shutil.move(temp_out, out)
 
-        # Cleanup burn dir
         try:
             if os.path.exists(temp_video): os.remove(temp_video)
-            if os.path.exists(temp_srt): os.remove(temp_srt)
+            if os.path.exists(temp_sub):   os.remove(temp_sub)
         except Exception:
             pass
 
-        self.logger.info(f"    Subtitles burned successfully")
+        self.logger.info("    Subtitles burned successfully")
 
     # ─── BACKGROUND MUSIC ─────────────────────────────────────────
 
@@ -480,6 +496,164 @@ class SlideshowAssembler:
 # ═══════════════════════════════════════════════════════════════
 #  HELPERS: SRT Generation
 # ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════
+#  KEYWORD HIGHLIGHTING — for ASS subtitle colour tagging
+# ═══════════════════════════════════════════════════════════════
+
+# ASS inline colour format is &HBBGGRR& (no alpha in overrides)
+_HIGHLIGHT_COLOR = "&H00FFFF"   # Yellow  (RGB 255,255,0  → BGR 00,FF,FF)
+_RESET_COLOR     = "&HFFFFFF"   # White   (RGB 255,255,255 → BGR FF,FF,FF)
+
+# Curated set of high-impact words that always get highlighted
+_POWER_WORDS = {
+    # scale / money
+    "million", "billion", "trillion", "thousand",
+    # emphasis
+    "never", "always", "every", "only", "first", "last",
+    # emotion / hook
+    "secret", "truth", "shocking", "warning", "mistake",
+    "proven", "finally", "suddenly", "literally", "actually",
+    # quality
+    "best", "worst", "free", "new", "top", "ultimate",
+    "incredible", "amazing", "powerful", "massive", "critical",
+    "dangerous", "urgent", "breakthrough", "revolutionary",
+    # ai / tech niche
+    "ai", "gpt", "llm", "robot", "automation", "algorithm",
+    "replace", "future", "data", "model", "chatgpt",
+    # world crisis / geopolitics niche
+    "war", "nuclear", "nato", "conflict", "crisis", "invasion",
+    "attack", "threat", "missile", "bomb", "troops", "military",
+    "escalation", "sanction", "alliance", "ceasefire", "casualties",
+}
+
+_NUMBER_RE = re.compile(r'^\d[\d,]*(?:\.\d+)?(?:[%xX+])?$')
+
+
+def _is_keyword(word: str) -> bool:
+    """Return True if this word should be highlighted in the subtitle."""
+    clean = re.sub(r"[^a-zA-Z0-9%+]", "", word)
+    if not clean:
+        return False
+    if _NUMBER_RE.match(clean):           # numbers, %, x multipliers
+        return True
+    if clean.lower() in _POWER_WORDS:     # curated impact list
+        return True
+    if len(clean) >= 8:                   # long words = usually key concepts
+        return True
+    return False
+
+
+def _ft_ass(s: float) -> str:
+    """Format seconds as ASS timestamp: H:MM:SS.cc (centiseconds)."""
+    h  = int(s // 3600)
+    m  = int((s % 3600) // 60)
+    sc = int(s % 60)
+    cs = int((s % 1) * 100)
+    return f"{h}:{m:02d}:{sc:02d}.{cs:02d}"
+
+
+def generate_ass_with_highlights(text, duration, output_ass,
+                                  font_size=28, margin_v=60,
+                                  width=1920, height=1080,
+                                  offset_sec=-0.5):
+    """
+    Generate an ASS subtitle file where keywords are highlighted in yellow.
+
+    Uses the same sentence-aware chunking + proportional timing as
+    generate_srt_from_text, but outputs ASS format so each keyword
+    gets an inline colour override tag.
+
+    Keyword rules (see _is_keyword):
+      - Numbers / percentages / multipliers
+      - Curated high-impact words (_POWER_WORDS)
+      - Any word >= 8 characters (usually a key concept)
+    """
+    MAX_WORDS = 10
+
+    # ── Sentence-aware chunking (same logic as generate_srt_from_text) ──
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    sentences = [s.strip() for s in sentences if s.strip()]
+
+    chunks = []
+    for sentence in sentences:
+        words = sentence.split()
+        if len(words) <= MAX_WORDS:
+            chunks.append(sentence)
+        else:
+            parts = re.split(r',\s*', sentence)
+            current = []
+            for part in parts:
+                trial = ((" ".join(current) + " " + part).strip() if current else part)
+                if len(trial.split()) <= MAX_WORDS:
+                    current.append(part)
+                else:
+                    if current:
+                        chunks.append(", ".join(current))
+                    part_words = part.split()
+                    for j in range(0, len(part_words), MAX_WORDS):
+                        chunks.append(" ".join(part_words[j:j + MAX_WORDS]))
+                    current = []
+            if current:
+                chunks.append(", ".join(current))
+
+    if not chunks:
+        return output_ass
+
+    # ── Proportional timing by word count ──
+    word_counts = [max(1, len(c.split())) for c in chunks]
+    total_words = sum(word_counts)
+
+    # ── Build ASS dialogue lines with inline colour tags ──
+    dialogue_lines = []
+    t = 0.0
+    for chunk, wc in zip(chunks, word_counts):
+        chunk_dur = (wc / total_words) * duration
+        # Shift timestamps earlier by offset_sec so subtitles stay in sync
+        # with speech (voice leads subtitles by ~0.5s without this offset).
+        # Clamp to 0 so the first entry never goes negative.
+        start = _ft_ass(max(0.0, t + offset_sec))
+        end   = _ft_ass(max(0.0, t + chunk_dur + offset_sec))
+        t += chunk_dur
+
+        tagged = []
+        for word in chunk.split():
+            if _is_keyword(word):
+                tagged.append(
+                    f"{{\\c{_HIGHLIGHT_COLOR}&}}{word}{{\\c{_RESET_COLOR}&}}"
+                )
+            else:
+                tagged.append(word)
+
+        dialogue_lines.append(
+            f"Dialogue: 0,{start},{end},Default,,0,0,0,,{' '.join(tagged)}"
+        )
+
+    # ── Write ASS file ──
+    ass_content = (
+        f"[Script Info]\n"
+        f"ScriptType: v4.00+\n"
+        f"PlayResX: {width}\n"
+        f"PlayResY: {height}\n"
+        f"ScaledBorderAndShadow: yes\n\n"
+        f"[V4+ Styles]\n"
+        f"Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        f"OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        f"ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        f"Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Default,Arial,{font_size},"
+        f"&H00FFFFFF,&H000000FF,&H00000000,&H80000000,"
+        f"1,0,0,0,100,100,0,0,1,2,1,5,40,40,0,1\n\n"
+        f"[Events]\n"
+        f"Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        + "\n".join(dialogue_lines) + "\n"
+    )
+
+    with open(output_ass, "w", encoding="utf-8") as f:
+        f.write(ass_content)
+
+    return output_ass
+
 
 def generate_srt_whisper(audio_path, output_srt, model_size="base"):
     import whisper

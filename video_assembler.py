@@ -536,8 +536,8 @@ class VideoAssembler:
             f"Bold=1,"
             f"Outline=2,"                  # Outline thickness
             f"Shadow=1,"                   # Shadow depth
-            f"MarginV={margin_v},"         # Bottom margin
-            f"Alignment=2"                 # Bottom center
+            f"MarginV=0,"                   # Center (no margin offset)
+            f"Alignment=5"                 # Middle center
         )
         
         # Escape the SRT path for FFmpeg filter (colons and backslashes)

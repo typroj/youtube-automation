@@ -19,7 +19,7 @@ except ImportError: pass
 
 from topic_and_script import TopicResearcher, ScriptWriter, Topic, Script, ScriptScene, NICHE_CONFIG
 from slideshow_assembler import (SlideshowAssembler, SlideshowConfig, generate_image_prompts,
-    fetch_pexels_images, generate_srt_from_text, generate_srt_whisper)
+    fetch_pexels_images, generate_ass_with_highlights)
 from youtube_uploader import (UploaderConfig, YouTubeUploader, VideoMetadata,
     PublishScheduler, QuotaExceededError)
 
@@ -268,13 +268,19 @@ class PipelineOrchestrator:
         self.logger.info(f"\n[5/9] Fetching {num_images} images...")
         image_paths = fetch_pexels_images(prompts, os.path.join(work_dir,"images"), orientation)
 
-        # 6. SRT SUBTITLES
-        self.logger.info("\n[6/9] Subtitles...")
+        # 6. ASS SUBTITLES (with keyword highlighting)
+        self.logger.info("\n[6/9] Subtitles (with keyword highlights)...")
         import subprocess
         dur = float(subprocess.run(["ffprobe","-v","quiet","-show_entries","format=duration",
             "-of","csv=p=0",audio_path], capture_output=True, text=True).stdout.strip() or "0")
-        srt_path = os.path.join(work_dir, "subtitles.srt")
-        generate_srt_from_text(narration, dur, srt_path)
+        sub_width  = 1080 if is_reel else self.cfg.video_width
+        sub_height = 1920 if is_reel else self.cfg.video_height
+        sub_font   = 74   if is_reel else 56   # reels: 1080x1920, long-form: 1920x1080
+        sub_margin = 150  if is_reel else 80
+        ass_path = os.path.join(work_dir, "subtitles.ass")
+        generate_ass_with_highlights(narration, dur, ass_path,
+                                     font_size=sub_font, margin_v=sub_margin,
+                                     width=sub_width, height=sub_height)
 
         # 7. ASSEMBLE (SLIDESHOW — music first, then subs with Windows fix)
         self.logger.info("\n[7/9] Assembling slideshow...")
@@ -283,11 +289,10 @@ class PipelineOrchestrator:
             width=1080 if is_reel else self.cfg.video_width,
             height=1920 if is_reel else self.cfg.video_height,
             fps=self.cfg.video_fps, crf=self.cfg.video_crf, preset=self.cfg.video_preset,
-            # CORRECT FONT SIZES: 42 for Reels, 28 for long-form
-            subtitle_font_size=28,
-            subtitle_margin_bottom=60,
-            reel_subtitle_font_size=22,
-            reel_subtitle_margin_bottom=100,
+            subtitle_font_size=56,
+            subtitle_margin_bottom=80,
+            reel_subtitle_font_size=74,
+            reel_subtitle_margin_bottom=150,
             bg_music_volume=self.cfg.bg_music_volume,
             reel_bg_music_volume=0.12,
             reel_max_duration=59 if is_reel else 9999,
@@ -296,9 +301,9 @@ class PipelineOrchestrator:
         assembler = SlideshowAssembler(slideshow_cfg)
         output_filename = f"{vid_id}.mp4"
         if is_reel:
-            video_path = assembler.assemble_reel(audio_path, image_paths, output_filename, srt_path, bg_music)
+            video_path = assembler.assemble_reel(audio_path, image_paths, output_filename, ass_path, bg_music)
         else:
-            video_path = assembler.assemble(audio_path, image_paths, output_filename, srt_path, bg_music)
+            video_path = assembler.assemble(audio_path, image_paths, output_filename, ass_path, bg_music)
         result["video_path"] = video_path
         result["size_mb"] = round(os.path.getsize(video_path)/(1024*1024), 1)
 
@@ -374,7 +379,6 @@ def main():
     p.add_argument("--upload", action="store_true")
     p.add_argument("--privacy", type=str, choices=["public","private","unlisted"])
     p.add_argument("--reels", action="store_true")
-    p.add_argument("--reels-count", type=int, default=3)
     p.add_argument("--multi-niche", type=str)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--discover-only", type=int, metavar="N")
@@ -402,7 +406,7 @@ def main():
         results.extend(orch.run(mode="longform", count=args.count, dry_run=args.dry_run))
     if args.reels:
         niches = [n.strip() for n in args.multi_niche.split(",")] if args.multi_niche else None
-        cnt = len(niches) if niches else args.reels_count
+        cnt = len(niches) if niches else args.count
         results.extend(orch.run(mode="reels", count=cnt, dry_run=args.dry_run, niches=niches))
 
     print(f"\n{'='*60}\nRESULTS\n{'='*60}")

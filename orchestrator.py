@@ -19,7 +19,7 @@ except ImportError: pass
 
 from topic_and_script import TopicResearcher, ScriptWriter, Topic, Script, ScriptScene, NICHE_CONFIG
 from slideshow_assembler import (SlideshowAssembler, SlideshowConfig, generate_image_prompts,
-    fetch_pexels_images, generate_ass_with_highlights)
+    fetch_pexels_images, generate_ass_with_highlights, generate_ass_whisper_with_highlights)
 from youtube_uploader import (UploaderConfig, YouTubeUploader, VideoMetadata,
     PublishScheduler, QuotaExceededError)
 
@@ -278,9 +278,21 @@ class PipelineOrchestrator:
         sub_font   = 84   if is_reel else 64   # reels: 1080x1920, long-form: 1920x1080
         sub_margin = 150  if is_reel else 80
         ass_path = os.path.join(work_dir, "subtitles.ass")
-        generate_ass_with_highlights(narration, dur, ass_path,
-                                     font_size=sub_font, margin_v=sub_margin,
-                                     width=sub_width, height=sub_height)
+        hook_duration = 0.0   # subtitles start from the first word
+        # generate_ass_whisper_with_highlights handles all fallbacks internally:
+        #   faster-whisper → openai-whisper → text-based ASS
+        # narration_text + audio_duration enable the text-based fallback if
+        # both Whisper backends fail (e.g. DLL errors on Windows).
+        self.logger.info("  Subtitles: karaoke (Whisper small) with text fallback…")
+        generate_ass_whisper_with_highlights(
+            audio_path, ass_path,
+            font_size=sub_font, margin_v=sub_margin,
+            width=sub_width, height=sub_height,
+            hook_duration=hook_duration,
+            model_size="small",
+            narration_text=narration,
+            audio_duration=dur,
+        )
 
         # 7. ASSEMBLE (SLIDESHOW — music first, then subs with Windows fix)
         self.logger.info("\n[7/9] Assembling slideshow...")
@@ -301,9 +313,11 @@ class PipelineOrchestrator:
         assembler = SlideshowAssembler(slideshow_cfg)
         output_filename = f"{vid_id}.mp4"
         if is_reel:
-            video_path = assembler.assemble_reel(audio_path, image_paths, output_filename, ass_path, bg_music)
+            video_path = assembler.assemble_reel(audio_path, image_paths, output_filename,
+                                                  ass_path, bg_music, hook_text=script.title)
         else:
-            video_path = assembler.assemble(audio_path, image_paths, output_filename, ass_path, bg_music)
+            video_path = assembler.assemble(audio_path, image_paths, output_filename,
+                                            ass_path, bg_music, hook_text=script.title)
         result["video_path"] = video_path
         result["size_mb"] = round(os.path.getsize(video_path)/(1024*1024), 1)
 

@@ -117,12 +117,12 @@ class Script:
 # Niche definitions: seed keywords + subreddits + YouTube category
 NICHE_CONFIG = {
     "ai_tools": {
-        "seeds": ["AI tools", "artificial intelligence", "ChatGPT", "AI automation",
-                   "machine learning", "AI news", "generative AI", "AI productivity"],
-        "subreddits": ["artificial", "ChatGPT", "MachineLearning", "singularity",
-                        "LocalLLaMA", "OpenAI", "StableDiffusion"],
+        "seeds": ["Claude AI Developer", "AI Driven Machine", "Claude", "AI automation",
+                   "AI Automation", "AI news", "Tools with AI", "AI productivity"],
+        "subreddits": [ "Claude", "Claude Code", "USA Government Claude",
+                        "Govenrments with Artificial Intellegence", "Claude", "AI Impacting Jobs"],
         "youtube_category": "28",
-        "news_keywords": "artificial intelligence OR AI tools OR ChatGPT OR machine learning",
+        "news_keywords": "AI Impacting Jobs OR Claude Code OR ChatGPT OR Govenrments with Artificial Intellegence",
     },
     "finance": {
         "seeds": ["investing", "stock market", "personal finance", "cryptocurrency",
@@ -163,6 +163,42 @@ NICHE_CONFIG = {
                         "todayilearned", "Archaeology", "AncientCivilizations"],
         "youtube_category": "27",
         "news_keywords": "historical discovery OR archaeology OR ancient history",
+    },
+    "tech_gadgets": {
+        "seeds": [
+            # Mobile & wearables
+            "latest smartphone 2026", "best smartphone camera 2026", "new iPhone 2026",
+            "smartwatch 2026 review", "smart glasses AR 2026", "AI earbuds 2026",
+            "smart contact lenses 2026", "foldable phone 2026", "rollable display phone 2026",
+            # Cameras & drones
+            "best mirrorless camera 2026", "drone review 2026", "FPV drone 2026",
+            "action camera 2026", "AI camera 2026",
+            # Gaming
+            "PlayStation 6 2026", "Xbox 2026", "gaming handheld 2026",
+            "VR headset 2026", "next gen gaming 2026",
+            # AI-driven gadgets
+            "AI gadgets 2026", "AI home robot 2026", "Meta Ray-Ban smart glasses 2026",
+            "smart home devices 2026", "AI wearable 2026", "AI smart ring 2026",
+            # Sports & health tech
+            "sports gadgets 2026", "fitness tracker 2026", "smart ring 2026",
+            "GPS sports watch 2026", "AI health wearable 2026",
+            # Emerging tech
+            "spatial computing 2026", "holographic display 2026",
+            "noise cancelling earbuds 2026", "brain computer interface 2026",
+            "exoskeleton suit 2026", "smart bike 2026",
+        ],
+        "subreddits": [
+            "gadgets", "smartphones", "Android", "apple",
+            "drones", "Cameras", "gaming", "hardware", "tech",
+            "virtualreality", "PS5", "wearables", "smartwatch",
+        ],
+        "youtube_category": "28",   # Science & Technology
+        "news_keywords": (
+            "smartphone 2026 OR smartwatch 2026 OR drone 2026 OR gadget 2026 OR "
+            "wearable 2026 OR camera 2026 OR PlayStation 6 OR VR headset 2026 OR "
+            "smart glasses 2026 OR earbuds 2026 OR foldable phone 2026 OR "
+            "AI device 2026 OR smart ring 2026 OR holographic 2026"
+        ),
     },
     "world_crisis": {
         "seeds": [

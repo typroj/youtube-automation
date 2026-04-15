@@ -56,7 +56,7 @@ class SlideshowConfig:
     reel_seconds_per_image: float = 5.0
     reel_min_seconds: float = 3.0
     reel_max_seconds: float = 8.0
-    reel_max_duration: int = 59
+    reel_max_duration: int = 89  # Instagram supports up to 90s Reels
 
     # Effects
     effects: List[str] = field(default_factory=lambda: [
@@ -84,6 +84,9 @@ class SlideshowConfig:
     bg_music_fade_in: float = 2.0
     bg_music_fade_out: float = 3.0
     reel_bg_music_volume: float = 0.12
+
+    # Vintage film effect (old-footage look for heritage/history niches)
+    vintage_effect: bool = False
 
     # Watermark
     watermark_path: Optional[str] = None
@@ -150,9 +153,14 @@ class SlideshowAssembler:
                       effects_list, sub_font_size, sub_margin, music_vol,
                       max_duration, hook_text=""):
 
-        # Step 1: Audio duration
+        # Step 1: Audio duration — speed up instead of cutting if over limit
         audio_duration = self._get_duration(audio_path)
-        if max_duration and audio_duration > max_duration:
+        if max_duration and audio_duration > max_duration + 1.0:  # 1s tolerance avoids float no-ops
+            speed = audio_duration / max_duration
+            sped_audio = os.path.join(self.cfg.temp_dir, "audio_tempo_adj.mp3")  # distinct name avoids in-place collision
+            self.logger.info(f"  Audio {audio_duration:.1f}s > {max_duration}s limit — speeding up {speed:.2f}x")
+            self._speed_audio(audio_path, sped_audio, speed)
+            audio_path = sped_audio
             audio_duration = max_duration
         self.logger.info(f"  Audio: {audio_duration:.1f}s | Res: {width}x{height}")
 
@@ -163,12 +171,18 @@ class SlideshowAssembler:
         # Step 3: Assign effects
         effects = self._assign_effects(len(image_paths), effects_list)
 
-        # Step 4: Render image clips
-        self.logger.info("  Rendering image clips...")
+        # Step 4: Render clips (images or video clips)
+        _video_exts = {".mp4", ".mov", ".webm", ".mkv", ".avi"}
+        n_vids = sum(1 for p in image_paths if Path(p).suffix.lower() in _video_exts)
+        label = "video clips" if n_vids == len(image_paths) else f"media ({n_vids} videos, {len(image_paths)-n_vids} images)"
+        self.logger.info(f"  Rendering {label}...")
         clip_paths = []
         for i, (img, dur, eff) in enumerate(zip(image_paths, durations, effects)):
             clip = os.path.join(self.cfg.temp_dir, f"clip_{i:03d}.mp4")
-            self._render_clip(img, clip, dur, eff, width, height)
+            if Path(img).suffix.lower() in _video_exts:
+                self._render_video_clip(img, clip, dur, width, height)
+            else:
+                self._render_clip(img, clip, dur, eff, width, height)
             clip_paths.append(clip)
             if (i + 1) % 5 == 0 or i == len(image_paths) - 1:
                 self.logger.info(f"    {i+1}/{len(image_paths)} clips done")
@@ -207,11 +221,11 @@ class SlideshowAssembler:
                                       hook_text, width, height)
         current = engaged_out
 
-        # Step 9: Trim if over max duration
+        # Step 9: Safety trim (only fires if engagement overlays added unexpected length)
         if max_duration:
             actual_dur = self._get_duration(current)
-            if actual_dur > max_duration:
-                self.logger.info(f"  Trimming {actual_dur:.0f}s → {max_duration}s...")
+            if actual_dur > max_duration + 2:  # 2s tolerance for overlay rounding
+                self.logger.info(f"  Safety trim {actual_dur:.0f}s → {max_duration}s...")
                 trimmed = os.path.join(self.cfg.temp_dir, "trimmed.mp4")
                 self._ffmpeg(["ffmpeg", "-y", "-i", current, "-t", str(max_duration),
                              "-c:v", "copy", "-c:a", "copy", trimmed])
@@ -257,12 +271,53 @@ class SlideshowAssembler:
             last = chosen
         return result
 
-    # ─── RENDER SINGLE CLIP ──────────────────────────────────────
+    # ─── RENDER SINGLE CLIP (image or video) ─────────────────────
+
+    def _vintage_vf(self) -> str:
+        """
+        FFmpeg filter chain that makes footage look like old film / ancient documentary.
+
+        Layers applied (in order):
+          1. eq          — lower brightness, lower saturation, slight contrast boost
+          2. colorbalance — warm sepia tint (more red/yellow, less blue)
+          3. noise        — film grain (temporal+uniform)
+          4. vignette     — dark edges, like an old projector lens
+        """
+        return (
+            "eq=contrast=1.12:brightness=-0.06:saturation=0.38:gamma=1.06,"
+            "colorbalance=rs=0.12:gs=0.02:bs=-0.18:rm=0.07:gm=0.01:bm=-0.10,"
+            "noise=alls=22:allf=t+u,"
+            "vignette=angle=PI/4:mode=forward"
+        )
+
+    def _render_video_clip(self, video_path, out, dur, w, h):
+        """
+        Trim + scale a Pexels video clip to the required duration and resolution.
+        Strips audio (audio is mixed in later).
+        Applies vintage film effect if cfg.vintage_effect is True.
+        """
+        base_vf = (
+            f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+            f"crop={w}:{h}:(iw-{w})/2:(ih-{h})/2,"
+            f"setsar=1"
+        )
+        vf = f"{base_vf},{self._vintage_vf()}" if self.cfg.vintage_effect else base_vf
+        self._ffmpeg([
+            "ffmpeg", "-y", "-i", video_path,
+            "-vf", vf,
+            "-t", str(dur),
+            "-r", str(self.cfg.fps),
+            "-c:v", self.cfg.codec, "-preset", "fast",
+            "-crf", str(self.cfg.crf + 2),
+            "-an", "-pix_fmt", "yuv420p", out,
+        ])
 
     def _render_clip(self, img, out, dur, effect, w, h):
         fps = self.cfg.fps
         frames = int(dur * fps) + fps
         vf = self._effect_filter(effect, w, h, dur + 1, fps, frames)
+        if self.cfg.vintage_effect:
+            vf = f"{vf},{self._vintage_vf()}"
         self._ffmpeg([
             "ffmpeg", "-y", "-loop", "1", "-framerate", str(fps),
             "-t", str(dur + 0.5), "-i", img,
@@ -342,7 +397,7 @@ class SlideshowAssembler:
             self._ffmpeg(["ffmpeg", "-y", "-i", inp, "-c", "copy", out])
             return
 
-        entry_count = sub_content.count("-->")
+        entry_count = sub_content.count("Dialogue:") if is_ass else sub_content.count("-->")
         self.logger.info(f"    {'ASS' if is_ass else 'SRT'} entries: {entry_count} | "
                          f"FontSize={font_size}, MarginV={margin}")
 
@@ -398,6 +453,22 @@ class SlideshowAssembler:
 
         self.logger.info("    Subtitles burned successfully")
 
+    # ─── AUDIO SPEED ──────────────────────────────────────────────
+
+    def _speed_audio(self, inp, out, speed):
+        """Speed up audio with atempo. Chains filters when speed > 2.0."""
+        chain = []
+        remaining = speed
+        while remaining > 2.0:
+            chain.append("atempo=2.0")
+            remaining /= 2.0
+        chain.append(f"atempo={remaining:.4f}")
+        self._ffmpeg([
+            "ffmpeg", "-y", "-i", inp,
+            "-filter:a", ",".join(chain),
+            "-c:a", "libmp3lame", "-q:a", "2", out,
+        ])
+
     # ─── BACKGROUND MUSIC ─────────────────────────────────────────
 
     def _mix_music(self, video, music, out, duration, volume):
@@ -422,18 +493,15 @@ class SlideshowAssembler:
 
     def _add_engagement_overlays(self, inp, out, duration, hook_text, width, height):
         """
-        Burns three engagement layers directly into the video via FFmpeg:
+        Burns engagement layers into the video via FFmpeg:
 
-          1. Progress bar  — amber bar at the very bottom, grows left→right
-                             as the video plays. Viewers stay longer when they
-                             can see how much content remains.
+          1. Hook banner   — full-width dark band at the bottom-third with
+                             two-line reveal (line 1 at 0s, line 2 at 1.2s).
+                             Positioned where thumbs hover while scrolling IG.
 
-          2. Hook title card — bold topic title shown centre-screen for the
-                             first 2.5 s with a fade-in. Reinforces the hook
-                             before viewers decide to skip.
+          3. Progress bar  — amber bar at the very bottom edge.
 
-          3. Subscribe CTA — fades in during the last 3.5 s at the top of
-                             the frame so it never covers subtitles.
+          4. Subscribe CTA — appears during last 3.5 s, bottom area.
         """
         is_vertical = height > width
 
@@ -443,26 +511,80 @@ class SlideshowAssembler:
         else:
             font = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
-        cta_fs  = 48 if is_vertical else 36
+        hook_fs = 76 if is_vertical else 54
+        cta_fs  = 44 if is_vertical else 32
         bar_h   = 12 if is_vertical else 8
 
-        # ── 1. Progress bar ──────────────────────────────────────
+        vf_parts = []
+
+        # ── 2. Hook banner (bottom-third, two-line reveal) ────────
+        if hook_text and hook_text.strip():
+            safe = re.sub(r"[':,\\\[\]{}]", " ", hook_text).strip()
+
+            # Split into two lines at midpoint word boundary
+            words = safe.split()
+            if len(words) > 3:
+                mid = len(words) // 2
+                line1 = " ".join(words[:mid])
+                line2 = " ".join(words[mid:])
+            else:
+                line1 = safe
+                line2 = ""
+
+            # Truncate each line so it fits within frame
+            max_chars = 22 if is_vertical else 35
+            line1 = line1[:max_chars]
+            line2 = line2[:max_chars]
+
+            # Full-width semi-transparent band behind the text
+            band_y  = "ih*0.58" if is_vertical else "ih*0.62"
+            band_h  = int(height * (0.22 if is_vertical else 0.20))
+            hook_band = (
+                f"drawbox=x=0:y={band_y}:w=iw:h={band_h}:"
+                f"color=black@0.82:t=fill:"
+                f"enable='between(t,0,3.0)'"
+            )
+            vf_parts.append(hook_band)
+
+            # Line 1 — appears immediately
+            text_y1 = f"H*{'0.61' if is_vertical else '0.65'}"
+            hook_line1 = (
+                f"drawtext=fontfile='{font}':"
+                f"text='{line1}':"
+                f"fontsize={hook_fs}:fontcolor=white:"
+                f"x=(W-tw)/2:y={text_y1}:"
+                f"enable='between(t,0,3.0)'"
+            )
+            vf_parts.append(hook_line1)
+
+            # Line 2 — appears at 1.2 s (staggered reveal)
+            if line2:
+                text_y2 = f"H*{'0.70' if is_vertical else '0.73'}"
+                hook_line2 = (
+                    f"drawtext=fontfile='{font}':"
+                    f"text='{line2}':"
+                    f"fontsize={hook_fs}:fontcolor=#FFD700:"
+                    f"x=(W-tw)/2:y={text_y2}:"
+                    f"enable='between(t,1.2,3.0)'"
+                )
+                vf_parts.append(hook_line2)
+
+        # ── 3. Progress bar (bottom edge) ─────────────────────────
         progress = (
             f"drawbox=x=0:y=ih-{bar_h}:"
             f"w='(t/{duration:.3f})*iw':"
             f"h={bar_h}:color=#FFB300@1:t=fill"
         )
+        vf_parts.append(progress)
 
-        vf_parts = [progress]
-
-        # ── 2. Subscribe CTA (top-centre, last 3.5 s) ───────────
+        # ── 4. Subscribe CTA (bottom area, last 3.5 s) ────────────
         cta_start = max(1.0, duration - 3.5)
         cta = (
             f"drawtext=fontfile='{font}':"
             f"text='LIKE and SUBSCRIBE for more':"
             f"fontsize={cta_fs}:fontcolor=yellow:"
-            f"x=(W-tw)/2:y=H*0.08:"
-            f"box=1:boxcolor=black@0.60:boxborderw=18:"
+            f"x=(W-tw)/2:y=H*0.88:"
+            f"box=1:boxcolor=black@0.60:boxborderw=16:"
             f"enable='gte(t,{cta_start:.2f})'"
         )
         vf_parts.append(cta)
@@ -474,7 +596,7 @@ class SlideshowAssembler:
             "-crf", str(self.cfg.crf),
             "-c:a", "copy", "-pix_fmt", "yuv420p", out,
         ])
-        self.logger.info("  Engagement overlays: progress bar + subscribe CTA")
+        self.logger.info("  Engagement overlays: hook banner + progress bar + CTA")
 
     # ─── WATERMARK ───────────────────────────────────────────────��
 
@@ -904,7 +1026,14 @@ def generate_ass_whisper_with_highlights(audio_path, output_ass,
                 else:
                     color = KW_UPCOMING if _is_keyword(cw["word"]) else UPCOMING
 
-                if color != cur_color:
+                if abs_j == i:
+                    # Active word: yellow + bold + 120% scale, then reset for next word
+                    parts.append(
+                        f"{{\\c{ACTIVE}&\\b1\\fscx120\\fscy120}}{cw['word']}"
+                        f"{{\\b0\\fscx100\\fscy100}}"
+                    )
+                    cur_color = ACTIVE
+                elif color != cur_color:
                     parts.append(f"{{\\c{color}&}}{cw['word']}")
                     cur_color = color
                 else:
@@ -1062,6 +1191,110 @@ def fetch_pexels_images(prompts, output_dir, orientation="landscape"):
             _placeholder(path, query[:30], orientation)
         paths.append(path)
     return paths
+
+
+def fetch_pexels_videos(prompts, output_dir, orientation="landscape", search_modifier=""):
+    """
+    Download short Pexels video clips for each prompt.
+    Returns list of local .mp4 paths (same length as prompts).
+    Falls back to a black placeholder clip if nothing is found.
+
+    search_modifier: optional prefix appended to every query to steer results
+      e.g. "ancient historical" for heritage niche
+    """
+    import requests
+    logger = logging.getLogger("PexelsFetch")
+    api_key = os.environ.get("PEXELS_API_KEY")
+    if not api_key:
+        raise ValueError("PEXELS_API_KEY not set")
+    os.makedirs(output_dir, exist_ok=True)
+    paths = []
+
+    # Target resolution for file selection
+    want_portrait = orientation == "portrait"
+
+    for i, query in enumerate(prompts):
+        out_path = os.path.join(output_dir, f"clip_{i:03d}.mp4")
+        # Use first 6 words of the prompt; prepend niche modifier for relevance
+        core_q   = " ".join(query.split()[:6])
+        search_q = f"{search_modifier} {core_q}".strip() if search_modifier else core_q
+        try:
+            resp = requests.get(
+                "https://api.pexels.com/videos/search",
+                headers={"Authorization": api_key},
+                params={"query": search_q, "per_page": 8,
+                        "orientation": orientation},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            videos = resp.json().get("videos", [])
+
+            # Fallback 1: drop the modifier, use core query only
+            if not videos and search_modifier:
+                resp = requests.get(
+                    "https://api.pexels.com/videos/search",
+                    headers={"Authorization": api_key},
+                    params={"query": core_q, "per_page": 8,
+                            "orientation": orientation},
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                videos = resp.json().get("videos", [])
+
+            # Fallback 2: broaden to first keyword only
+            if not videos:
+                resp = requests.get(
+                    "https://api.pexels.com/videos/search",
+                    headers={"Authorization": api_key},
+                    params={"query": core_q.split()[0], "per_page": 8,
+                            "orientation": orientation},
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                videos = resp.json().get("videos", [])
+
+            if videos:
+                video = random.choice(videos)
+                files = video.get("video_files", [])
+
+                # Pick best file: prefer HD at target orientation
+                def _score(f):
+                    h, w = f.get("height", 0), f.get("width", 0)
+                    orientation_ok = (h > w) if want_portrait else (w >= h)
+                    quality_score = min(h, 1080)
+                    return (int(orientation_ok) * 10000) + quality_score
+
+                best = max(files, key=_score) if files else None
+                if best:
+                    vid_data = requests.get(best["link"], stream=True, timeout=60)
+                    with open(out_path, "wb") as f:
+                        for chunk in vid_data.iter_content(chunk_size=65536):
+                            f.write(chunk)
+                    logger.info(f"  [{i+1}/{len(prompts)}] {search_q[:40]}"
+                                f" ({best.get('height')}p)")
+                    paths.append(out_path)
+                    continue
+
+        except Exception as e:
+            logger.warning(f"  [{i+1}] Video fetch failed: {e}")
+
+        # Fallback: generate a black placeholder clip (1s, will be looped by FFmpeg)
+        _placeholder_video(out_path, query[:30], orientation)
+        paths.append(out_path)
+
+    return paths
+
+
+def _placeholder_video(path, text, orientation):
+    """Generate a short black MP4 clip as fallback when Pexels returns nothing."""
+    w, h = (1080, 1920) if orientation == "portrait" else (1920, 1080)
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", f"color=c=black:s={w}x{h}:r=30:d=5",
+        "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
+        "-t", "5", "-c:v", "libx264", "-c:a", "aac",
+        "-pix_fmt", "yuv420p", path,
+    ], capture_output=True)
 
 
 def _placeholder(path, text, orientation):

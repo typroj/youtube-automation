@@ -90,7 +90,8 @@ class Script:
     scenes: List[ScriptScene] = field(default_factory=list)
     total_duration: float = 0.0
     total_words: int = 0
-    hook_text: str = ""                  # First 5 seconds
+    hook_text: str = ""                  # First 5 seconds narration
+    hook_question: str = ""              # Short bold question/statement for visual overlay (≤40 chars)
     cta_text: str = ""                   # Call to action
     description_seo: str = ""            # For YouTube description
     tags: List[str] = field(default_factory=list)
@@ -198,6 +199,26 @@ NICHE_CONFIG = {
             "wearable 2026 OR camera 2026 OR PlayStation 6 OR VR headset 2026 OR "
             "smart glasses 2026 OR earbuds 2026 OR foldable phone 2026 OR "
             "AI device 2026 OR smart ring 2026 OR holographic 2026"
+        ),
+    },
+    "heritage": {
+        "seeds": [
+            "ancient India history", "lost Hindu temples", "Buddhist heritage India",
+            "Angkor Wat history", "ancient civilizations Asia", "Hindu Buddhist kingdoms",
+            "Takshashila university ancient", "lost history India", "ancient Indian architecture",
+            "Hindu temples Afghanistan", "Bali Hindu culture", "Zoroastrian history Persia",
+            "archaeology India secrets", "untold Indian history", "ancient trade routes India",
+            "Nalanda university history", "Vijayanagara empire", "Chola dynasty temples",
+            "ancient India Southeast Asia", "Buddhist monuments India",
+        ],
+        "subreddits": [
+            "IndiaSpeaks", "IndianHistory", "hinduism", "Buddhism",
+            "AncientCivilizations", "Archaeology", "AskHistorians", "HistoryPorn",
+        ],
+        "youtube_category": "27",   # Education
+        "news_keywords": (
+            "ancient India OR Hindu temple OR Buddhist heritage OR archaeology India OR "
+            "lost civilization OR ancient history OR Hindu kingdom OR Buddhist monastery"
         ),
     },
     "world_crisis": {
@@ -330,46 +351,59 @@ class TopicResearcher:
         return fetchers.get(source, lambda: [])
 
     def _fetch_google_trends(self) -> List[Topic]:
-        """Fetch trending and rising topics from Google Trends via pytrends."""
+        """
+        Fetch rising/top related queries from Google Trends via pytrends.
+
+        Note: trending_searches() and realtime_trending_searches() were
+        deprecated by Google (404 as of 2026). We use related_queries()
+        and interest_over_time() which remain functional.
+        """
         from pytrends.request import TrendReq
 
-        topics = []
-        pytrends = TrendReq(hl="en-US", tz=330, retries=3, backoff_factor=0.5)
+        # Do NOT pass retries/backoff_factor — breaks with urllib3 2.x
+        pytrends = TrendReq(hl="en-US", tz=330)
+        topics   = []
+        seeds    = self.niche_cfg["seeds"][:3]   # max 3 seeds to stay under rate limit
 
-        # 1. Today's trending searches
-        try:
-            trending = pytrends.trending_searches(pn="united_states")
-            for _, row in trending.head(20).iterrows():
-                term = row[0] if isinstance(row[0], str) else str(row.iloc[0])
-                topics.append(Topic(
-                    title=term,
-                    source="google_trends",
-                    keyword=term,
-                    search_volume_trend="trending",
-                ))
-        except Exception as e:
-            self.logger.debug(f"Trending searches failed: {e}")
+        rate_limited = False   # circuit breaker — trips on first 429
 
-        # 2. Related rising queries for niche seeds
-        for seed in self.niche_cfg["seeds"][:3]:  # limit to avoid rate limits
+        for seed in seeds:
+            if rate_limited:
+                break
+
             try:
                 pytrends.build_payload([seed], timeframe="now 7-d")
                 related = pytrends.related_queries()
 
-                if seed in related and related[seed].get("rising") is not None:
-                    rising = related[seed]["rising"]
-                    for _, row in rising.head(5).iterrows():
-                        topics.append(Topic(
-                            title=row.get("query", ""),
-                            source="google_trends",
-                            keyword=row.get("query", ""),
-                            search_volume_trend="rising",
-                            related_keywords=[seed],
-                        ))
-                time.sleep(2)  # respect rate limits
-            except Exception as e:
-                self.logger.debug(f"Related queries for '{seed}' failed: {e}")
+                for kind, trend_label in (("rising", "rising"), ("top", "stable")):
+                    df = (related.get(seed) or {}).get(kind)
+                    if df is None or df.empty:
+                        continue
+                    for _, row in df.head(5).iterrows():
+                        query = row.get("query", "").strip()
+                        if query:
+                            topics.append(Topic(
+                                title=query,
+                                source="google_trends",
+                                keyword=query,
+                                search_volume_trend=trend_label,
+                                related_keywords=[seed],
+                                score=float(row.get("value", 50)),
+                            ))
 
+                time.sleep(3)   # polite pause between seeds
+
+            except Exception as e:
+                if "429" in str(e):
+                    self.logger.warning(
+                        "google_trends: rate-limited — skipping remaining seeds "
+                        "and falling back to Reddit/News sources."
+                    )
+                    rate_limited = True   # trip circuit breaker, exit loop
+                else:
+                    self.logger.warning(f"google_trends: '{seed}' failed: {e}")
+
+        self.logger.debug(f"google_trends: {len(topics)} rising/top queries found")
         return topics
 
     def _fetch_youtube_trending(self) -> List[Topic]:
@@ -792,16 +826,24 @@ class ScriptWriter:
         target_words = video_length * 150
         num_scenes = max(4, video_length)  # roughly 1 scene per minute
 
-        prompt = self._build_prompt(
-            topic=topic_str,
-            topic_context=topic_context,
-            target_words=target_words,
-            num_scenes=num_scenes,
-            tone=tone,
-            target_audience=target_audience,
-            niche=niche,
-            custom_instructions=custom_instructions,
-        )
+        is_reel = video_length <= 1
+        if is_reel:
+            prompt = self._build_reel_prompt(
+                topic=topic_str, topic_context=topic_context,
+                tone=tone, niche=niche,
+                custom_instructions=custom_instructions,
+            )
+        else:
+            prompt = self._build_prompt(
+                topic=topic_str,
+                topic_context=topic_context,
+                target_words=target_words,
+                num_scenes=num_scenes,
+                tone=tone,
+                target_audience=target_audience,
+                niche=niche,
+                custom_instructions=custom_instructions,
+            )
 
         self.logger.info(f"Generating script: '{topic_str}' ({video_length} min, {num_scenes} scenes)")
 
@@ -863,16 +905,78 @@ Output ONLY JSON, no markdown or explanation."""
 
     # ─── PROMPT ENGINEERING ───────────────────────────────────────────
 
+    def _build_reel_prompt(self, topic, topic_context, tone, niche,
+                            custom_instructions="") -> str:
+        """
+        Reel-specific prompt (≤60s).  Laser-focused on stopping the scroll
+        within the first 2 seconds using proven hook formulas.
+        """
+        tone_desc = self.TONE_PROMPTS.get(tone, tone)
+        return f"""You are a viral Hinglish short-form video scriptwriter for Indian audiences. You MUST write every narration line in HINGLISH — a natural mix of Hindi and English written in Roman script. Pure English scripts will be rejected.
+
+TOPIC: {topic}
+{f"CONTEXT: {topic_context}" if topic_context else ""}
+NICHE: {niche}
+TONE: {tone_desc}
+{f"ADDITIONAL: {custom_instructions}" if custom_instructions else ""}
+
+⚠️ MANDATORY LANGUAGE RULE — HINGLISH ONLY (Roman script, NO Devanagari):
+  - Every sentence MUST contain Hindi words mixed with English
+  - Use Hindi for: emotions, emphasis, connectors, reactions, conversational filler
+  - Keep in English: technical terms, brand names, numbers, proper nouns
+  - Target ratio: ~55% English words, ~45% Hindi words
+  - CORRECT: "Yaar, Claude ka source code leak ho gaya — aur jo secrets saamne aaye, wo mind-blowing hain!"
+  - CORRECT: "Sach mein, ye AI model internally sochti hai pehle — literally ek internal monologue hai!"
+  - WRONG: "Claude's source code leaked and the secrets were mind-blowing." ← Pure English, NOT allowed
+  - Never use Devanagari script (ElevenLabs reads Roman only)
+
+TARGET: A 45-60 second reel script (~120 words of narration). Every word earns its place.
+
+HOOK FORMULA — Pick the strongest one for this topic (write it in Hinglish):
+  A) SHOCKING STAT:   "X% of people have no idea that..."
+  B) BOLD CLAIM:      "This single [thing] is destroying your [outcome]..."
+  C) OPEN LOOP:       "What happened next shocked everyone, including the experts..."
+  D) DIRECT QUESTION: "Are you making this [topic] mistake right now?"
+  E) CONTROVERSY:     "Everyone says [X] — but they are completely wrong."
+
+REEL STRUCTURE (strict):
+  Scene 0 [hook]    — 1 sentence. The scroll-stopper. Uses one of the formulas above. NO filler words.
+  Scene 1 [content] — Core insight / story beat 1. Build tension or curiosity.
+  Scene 2 [content] — Core insight / story beat 2. Deliver value or twist.
+  Scene 3 [cta]     — End with an incomplete thought or direct question to force a comment ("Comment below if...").
+
+RULES:
+- First word must NOT be "I", "Hey", "So", "Today", "Welcome", or "In this video"
+- hook_question must be ≤ 40 characters — it will be shown as a bold text overlay on screen
+- No scene narration longer than 40 words
+- hook_question must be a SHORT punchy question or statement that appears on screen (≤40 chars)
+
+OUTPUT — Return ONLY valid JSON:
+{{
+  "title": "Reel title (40-60 chars, high curiosity)",
+  "hook_text": "The exact first spoken sentence",
+  "hook_question": "Short bold question for screen overlay ≤40 chars",
+  "scenes": [
+    {{"scene_id": 0, "scene_type": "hook", "narration": "...", "visual_cue": "...", "on_screen_text": "...", "transition": "cut"}},
+    {{"scene_id": 1, "scene_type": "content", "narration": "...", "visual_cue": "...", "on_screen_text": "...", "transition": "cut"}},
+    {{"scene_id": 2, "scene_type": "content", "narration": "...", "visual_cue": "...", "on_screen_text": "...", "transition": "cut"}},
+    {{"scene_id": 3, "scene_type": "cta", "narration": "...", "visual_cue": "...", "on_screen_text": "...", "transition": "fade"}}
+  ],
+  "cta_text": "Comment call-to-action",
+  "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"],
+  "thumbnail_concept": "Eye-catching thumbnail idea",
+  "description_seo": "2-sentence reel description with keywords"
+}}"""
+
     def _build_prompt(
         self, topic, topic_context, target_words, num_scenes,
         tone, target_audience, niche, custom_instructions,
     ) -> str:
         tone_desc = self.TONE_PROMPTS.get(tone, tone)
 
-        return f"""You are an elite YouTube scriptwriter who specialises in faceless, narration-driven videos.
-Your scripts consistently achieve 50%+ average view duration because you master retention mechanics.
+        return f"""You are an elite Hinglish YouTube scriptwriter for Indian audiences. You write in HINGLISH — natural Hindi+English mix in Roman script. Pure English narration is NOT acceptable. Every sentence must blend both languages.
 
-TASK: Write a complete {num_scenes}-scene YouTube script about the following topic.
+TASK: Write a complete {num_scenes}-scene Hinglish YouTube script about the following topic.
 
 TOPIC: {topic}
 {f"CONTEXT: {topic_context}" if topic_context else ""}
@@ -881,6 +985,16 @@ TONE: {tone_desc}
 NICHE: {niche}
 TARGET AUDIENCE: {target_audience or "General YouTube audience interested in " + niche}
 {f"ADDITIONAL INSTRUCTIONS: {custom_instructions}" if custom_instructions else ""}
+
+⚠️ MANDATORY LANGUAGE RULE — HINGLISH ONLY (Roman script, NO Devanagari):
+  - Every sentence MUST contain Hindi words mixed with English
+  - Use Hindi for: emotions, emphasis, connectors, reactions, conversational filler
+  - Keep in English: technical terms, brand names, numbers, proper nouns
+  - Target ratio: ~55% English words, ~45% Hindi words
+  - CORRECT: "Yaar, ye technology itni powerful hai ki duniya badal gayi — literally har cheez."
+  - CORRECT: "Lekin baat yahan khatam nahi hoti — asli twist toh aage hai."
+  - WRONG: "This technology is so powerful it changed the world." ← Pure English, NOT allowed
+  - Never use Devanagari script
 
 RETENTION RULES (follow these strictly):
 1. HOOK (first 10 seconds): Start with a bold claim, surprising fact, or provocative question. 
@@ -951,7 +1065,10 @@ Write {num_scenes} scenes totalling approximately {target_words} words of narrat
 
     def _call_anthropic(self, prompt: str) -> str:
         import anthropic
-        client = anthropic.Anthropic(api_key=self.api_key)
+        client = anthropic.Anthropic(
+            api_key=self.api_key,
+            timeout=60.0,   # 60s hard timeout — prevents infinite hangs
+        )
         response = client.messages.create(
             model=self.model,
             max_tokens=8000,
@@ -1022,6 +1139,7 @@ Write {num_scenes} scenes totalling approximately {target_words} words of narrat
             title=data.get("title", topic),
             scenes=scenes,
             hook_text=data.get("hook_text", ""),
+            hook_question=data.get("hook_question", ""),
             cta_text=data.get("cta_text", ""),
             tags=data.get("tags", []),
             thumbnail_concept=data.get("thumbnail_concept", ""),
